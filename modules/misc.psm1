@@ -1,6 +1,19 @@
 ﻿# Misc Utilities/Functions
 Add-Type -AssemblyName Microsoft.VisualBasic
 
+function Write-Log {
+    [Alias('log')]
+    param(
+        [object[]] $InputObject,
+        [ValidateSet('Cyan', 'Red', 'Orange', 'Green', 'Yellow', 'White', 'Magenta')][string] $Colour = "Cyan"
+    )
+    foreach ($item in $InputObject) {
+        foreach ($line in ($item | Out-String)) {
+            Write-Host ("{0} | {1}" -f (Get-Date -Format "dd/MM/yyyy HH:mm:ss"), $line) -ForegroundColor $Colour
+        }
+    }
+}
+
 function Set-TabName {
     [alias('tname')]param($TabName)
     $Host.UI.RawUI.WindowTitle = $TabName
@@ -666,12 +679,174 @@ function Get-DownloadViaBits {
     }
 }
 
-$global:DeleteBuffer = New-Object System.Collections.Stack
+class DeleteBuffer {
+    [System.Collections.ArrayList]$DeletedItems
+    [System.Collections.ArrayList]$BinItems
+    [int]$Count
+
+    DeleteBuffer() {
+        $this.DeletedItems = New-Object System.Collections.ArrayList
+        $this.BinItems = New-Object System.Collections.ArrayList
+    }
+
+    DeleteBuffer([bool]$IncludeRecycleBinItems) {
+        $this.DeletedItems = New-Object System.Collections.ArrayList
+        $this.BinItems = New-Object System.Collections.ArrayList
+        $this.AddRecyleBinItems()
+    }
+
+    AddRecyleBinItems() {
+        foreach ($item in Get-RecycleBinItems | Where-Object { -not $_.IsFolder }) {
+            $itemDetails = Get-RecycleBinItemDetails $item
+            $this.AddItem($itemDetails.Name, $itemDetails.OriginalFullName, "SendToRecycleBin", $itemDetails.Modified)
+        }
+        $this.UpdateCount()
+    }
+
+    ClearBuffer() {
+        Write-Log "Clearing Full Delete Buffer"
+        $this.DeletedItems.Clear()
+        $this.BinItems.Clear()
+        $this.UpdateCount()
+    }
+
+    ClearDeletedItems() {
+        Write-Log "Clearing Deleted Items"
+        $this.DeletedItems.Clear()
+        $this.UpdateCount()
+    }
+
+    ClearBinItems() {
+        Write-Log "Clearing Bin Items"
+        $this.BinItems.Clear()
+        $this.UpdateCount()
+    }
+
+    [DeleteBufferItem[]] GetItems() {
+        $items = @()
+        foreach ($item in $this.BinItems) { $items += $item }
+        foreach ($item in $this.DeletedItems) { $items += $item }
+        return $items
+    }
+
+    [DeleteBufferItem] GetLatestRecycledItem() {
+        return $this.BinItems | Sort-Object -Property DeletedTime -Descending | Select-Object -First 1
+    }
+
+    hidden UpdateCount() {
+        $this.Count = $this.BinItems.Count + $this.DeletedItems.Count
+    }
+
+    AddItem($Name, $Path, $DeleteMode) {
+        switch ($DeleteMode) {
+            "SendToRecycleBin" { $this.BinItems.Add([DeleteBufferItem]::new($Name, $Path, $DeleteMode)) >$null }
+            "DeletePermanently" { $this.DeletedItems.Add([DeleteBufferItem]::new($Name, $Path, $DeleteMode)) >$null }
+        }
+        $this.UpdateCount()
+    }
+
+    AddItem($Name, $Path, $DeleteMode, $DeletedTime) {
+        switch ($DeleteMode) {
+            "SendToRecycleBin" { $this.BinItems.Add([DeleteBufferItem]::new($Name, $Path, $DeleteMode, $DeletedTime)) >$null }
+            "DeletePermanently" { $this.DeletedItems.Add([DeleteBufferItem]::new($Name, $Path, $DeleteMode, $DeletedTime)) >$null }
+        }
+        $this.UpdateCount()
+    }
+
+    RemoveItem([DeleteBufferItem]$Item) {
+        switch ($Item.DeleteMode) {
+            "SendToRecycleBin" { $this.BinItems.Remove($Item) >$null }
+            "DeletePermanently" { $this.DeletedItems.Remove($Item) >$null }
+        }
+        $this.UpdateCount()
+    }
+
+    Undo() {
+        $deletedItem = $this.BinItems | Sort-Object -Property DeletedTime -Descending | Select-Object -First 1
+        if ($deletedItem) {
+            try {
+                $deletedItem.Restore()
+            }
+            catch {
+                Write-Error "Failed to Undo"
+            }
+        }
+        else {
+            Write-Log "Nothing to Undo"
+        }
+        $this.UpdateCount()
+    }
+}
+
+class DeleteBufferItem {
+    [string]$Name
+    [string]$Path
+    [string]$DeleteMode
+    [datetime]$DeletedTime
+    [pscustomobject]$BinItem
+
+    DeleteBufferItem ([string]$Name, [string]$Path, [string]$DeleteMode) {
+        $this.Name = $Name
+        $this.Path = $Path
+        $this.DeleteMode = $DeleteMode
+        $this.DeletedTime = (Get-Date)
+        $this.BinItem = if($DeleteMode -eq "SendToRecycleBin"){Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name)}
+    }
+
+    DeleteBufferItem ([string]$Name, [string]$Path, [string]$DeleteMode, [datetime]$DeletedTime) {
+        $this.Name = $Name
+        $this.Path = $Path
+        $this.DeleteMode = $DeleteMode
+        $this.DeletedTime = $DeletedTime
+        $this.BinItem = if($DeleteMode -eq "SendToRecycleBin"){Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name)}
+    }
+
+    Restore() {
+        if ($this.DeleteMode -eq "SendToRecycleBin") {
+            if (Restore-RecycleBinItem -Name $this.Name) {
+                $global:DeleteBuffer.RemoveItem($this)
+            }
+        }
+        else {
+            Write-Log ("This file '{0}' is permanently deleted and cannot be restored." -f $this.Name)
+        }
+    }
+
+    Restore([bool]$Overwrite) {
+        if ($this.DeleteMode -eq "SendToRecycleBin") {
+            if (Restore-RecycleBinItem -Name $this.Name -Overwrite) {
+                $global:DeleteBuffer.RemoveItem($this)
+            }
+        }
+        else {
+            Write-Log ("This file '{0}' is permanently deleted and cannot be restored." -f $this.Name)
+        }
+    }
+
+    Restore([string]$DestinationPath) {
+        if ($this.DeleteMode -eq "SendToRecycleBin") {
+            if (Restore-RecycleBinItem -Name $this.Name -DestinationPath $DestinationPath) {
+                $global:DeleteBuffer.RemoveItem($this)
+            }
+        }
+        else {
+            Write-Log ("This file '{0}' is permanently deleted and cannot be restored." -f $this.Name)
+        }
+    }
+
+    Restore([string]$DestinationPath, [bool]$Overwrite) {
+        if ($this.DeleteMode -eq "SendToRecycleBin") {
+            if (Restore-RecycleBinItem -Name $this.Name -DestinationPath $DestinationPath -Overwrite) {
+                $global:DeleteBuffer.RemoveItem($this)
+            }
+        }
+        else {
+            Write-Log ("This file '{0}' is permanently deleted and cannot be restored." -f $this.Name)
+        }
+    }
+}
 
 function Get-RecycleBinItems {
-    [alias('bin')]
-    param()
-
     $shell = New-Object -com shell.application
     $rb = $shell.Namespace(10)
 
@@ -679,11 +854,19 @@ function Get-RecycleBinItems {
 }
 
 function Get-RecycleBinItem {
+    [alias('bin')]
     param(
-        [Parameter(Mandatory = $true)]$Name
+        [Parameter(Mandatory = $false)]$Name = "ALL"
     )
 
-    return (bin | Where-Object name -EQ $Name)
+    $BinItems = Get-RecycleBinItems
+
+    if ($Name -eq "ALL") {
+        return $BinItems
+    }
+    else {
+        return $BinItems | Where-Object { $_.Name -eq $Name } | Sort-Object ModifyDate -Descending | Select-Object -First 1
+    }
 }
 
 function Get-RecycleBinItemDetails {
@@ -695,7 +878,7 @@ function Get-RecycleBinItemDetails {
     )
     #this function relies variables set in a parent scope
     Process {
-        Write-Log "[ PROCESS ] Processing $($item.path)"
+        # Write-Log "[ PROCESS ] Processing $($item.path)"
         
         # uncomment for troubleshooting
         # $global:raw += $item
@@ -776,14 +959,14 @@ function Remove-ItemCustom {
         }
         else {
             $fullpath = $item.FullName
-            Write-Log ($FileMessage -replace "\{0\}", $fullpath)
+            Write-Log ($FileMessage -f $fullpath)
             if (Test-Path -Path $fullpath -PathType Container) {
                 [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($fullpath, 'OnlyErrorDialogs', $DeleteMode)
             }
             else {
                 [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($fullpath, 'OnlyErrorDialogs', $DeleteMode)
             }
-            $global:DeleteBuffer.Push([pscustomobject]@{Name = $item.Name; Path = $fullpath; DeleteMode = $DeleteMode })
+            $global:DeleteBuffer.AddItem($item.Name, $fullpath, $DeleteMode)
         }
     }
 }
@@ -791,50 +974,47 @@ function Remove-ItemCustom {
 function Undo-RemoveItemToRecycleBin {
     [alias('undo')]
     param()
-
-    if ($global:DeleteBuffer.Count -gt 0) {
-        $BinItem = Get-RecycleBinItem ($global:DeleteBuffer | Select-Object -First 1 -ExpandProperty Name)
-        if ($BinItem.IsFolder) {
-            
-        }
-        else {
-
-        }
-        Get-RecycleBinItemDetails $binItem
-        Restore-RecycleBinItem $BinItem
-        $global:DeleteBuffer.Pop()
+    try {
+        $global:DeleteBuffer.Undo()
     }
-    else {
-        Write-Log "No files/folders in DeleteBuffer"
+    catch {
+        Write-Error "Failed to Undo delete operation.`n$($_.Exception.Message)"
     }
 }
 
 Function Restore-RecycleBinItem {
-    [cmdletbinding(SupportsShouldProcess)]
-    Param(
-        [Parameter(Mandatory, ValueFromPipeline)]
-        [ValidateNotNullOrEmpty()]
-        [object]$Item
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $false)][string]$DestinationPath,
+        [Parameter(Mandatory = $false)][switch]$Overwrite
     )
-    Begin {
-        Write-Log "[ BEGIN ] Starting $($myinvocation.mycommand)"
-
-    } #begin
-
-    Process {
-        Write-Log "[ PROCESS ] $($Item.Path) "
-        if (-Not (Test-Path $Item.originalPath)) {
-            New-Item $Item.originalpath -Force -ItemType directory
+    try {
+        Write-Log ("Restoring '{0}' from Recycle Bin." -f $Name)
+        $binItem = Get-RecycleBinItemDetails (Get-RecycleBinItem $Name)
+        if ($binItem.IsFolder) {
+            [Microsoft.VisualBasic.FileIO.FileSystem]::MoveDirectory($binItem.Path, $binItem.OriginalFullName)
         }
-        Move-Item -Path $Item.Path -Destination $Item.OriginalFullName -PassThru -Force
-
-    } #process
-
-    End {
-        Write-Log "[ END ] Ending $($myinvocation.mycommand)"
-    } #end
-
-} #close Restore-RecyleBinItem
+        else {
+            $destination = if ([string]::IsNullOrEmpty($DestinationPath)) {
+                $binItem.OriginalFullName
+            }
+            else {
+                if ($DestinationPath -match "\.*\.[a-zA-Z]+$") {
+                    $DestinationPath
+                }
+                else {
+                    Join-Path -Path (Resolve-Path $DestinationPath).Path -ChildPath $binItem.Name
+                }
+            }
+            [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($binItem.Path, $destination, $Overwrite.IsPresent)
+        }
+        Write-Log ("Restored '{0}' to '{1}'." -f $binItem.Name, $destination)
+        return $true
+    }
+    catch {
+        Write-Error ("Failed to restore file '{0}' from Recycle Bin.`n{1}" -f $Item.Name, $_.Exception.Message)
+    }
+}
 
 function Install-ChocoApp {
     [Alias('chocoinstall')]
@@ -890,6 +1070,10 @@ function Update-ChocoApp {
     }
     Write-Output "`n`n"
 }
+
+
+$global:DeleteBuffer = [DeleteBuffer]::new()
+# $global:DeleteBuffer = [DeleteBuffer]::new($true)
 
 
 Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Imported Miscellaneous Utilities Module" -ForegroundColor Cyan
