@@ -19,20 +19,6 @@ function Set-TabName {
     $Host.UI.RawUI.WindowTitle = $TabName
 }
 
-function Set-Directory {
-    [alias('cd')]
-    param([string] $Path = '.')
-    Set-Location $Path
-    $FullPath = (Get-Item .).FullName
-    $GitResult = & git branch
-    if ($GitResult -notlike 'fatal*') {
-        Set-TabName "$(GitRepo)/$(GitBranch) > $FullPath"
-    }
-    else {
-        Set-TabName $FullPath
-    }
-}
-
 function Get-CurrentContext {
     [Alias('isadmin')]
     param()
