@@ -59,6 +59,7 @@ function Invoke-GitClone {
 function Invoke-GitPull { [alias('pull')]param()Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Pull"; & git pull $args }
 
 function Invoke-GitPush { [alias('push')]param()if ($args.Count -gt 0) { Invoke-GitCommit @args }; Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Push"; if ((& git push) -ilike '*has no upstream branch*') { $branch = Get-GitBranch; & git push -u origin $branch } }
+function Invoke-GitPushForced { [alias('pushf')]param()if ($args.Count -gt 0) { Invoke-GitCommit @args -Force }; Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Push"; if ((& git push -f) -ilike '*has no upstream branch*') { $branch = Get-GitBranch; & git push -u origin $branch -f } }
 
 function Get-GitBranches { [alias('list')]param([Alias('f')][switch]$Fetch)if ($Fetch) { Invoke-GitFetch }; Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - List All Branches"; Write-Output (& git branch -a) }
 
