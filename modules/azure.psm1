@@ -5,15 +5,15 @@ function Set-AzSubscription {
     [cmdletbinding()]
     param()
     DynamicParam {
-        $subscriptions = Get-AzSubscription
-        New-DynamicParam -Name Subscription -ValidateSet $subscriptions.Name -Position 0 -Mandatory
+        $azSubscriptionsPs = Get-AzSubscription
+        $subscriptionNamesAndIds = $azSubscriptionsPs | ForEach-Object { $_.Name; $_.Id }
+        New-DynamicParam -Name Subscription -ValidateSet $subscriptionNamesAndIds -Position 0 -Mandatory
     }
     begin {
         $Subscription = $PSBoundParameters.Subscription
     }
     process {
         Select-AzSubscription $Subscription
-        $global:AzureContext = Get-AzContext
     }
 }
 
@@ -22,8 +22,9 @@ function Set-AzCliSubscription {
     [cmdletbinding()]
     param()
     DynamicParam {
-        $subscriptions = az account list --query '[].{Name: name, ID: id}' | Out-String | ConvertFrom-Json 
-        New-DynamicParam -Name Subscription -ValidateSet $subscriptions.Name -Position 0 -Mandatory
+        $azSubscriptionsCli = az account list --query '[].{Name: name, Id: id}' | Out-String | ConvertFrom-Json
+        $subscriptionNamesAndIds = $azSubscriptionsCli | ForEach-Object { $_.Name; $_.Id }
+        New-DynamicParam -Name Subscription -ValidateSet $subscriptionNamesAndIds -Position 0 -Mandatory
     }
     begin {
         $Subscription = $PSBoundParameters.Subscription
@@ -31,7 +32,6 @@ function Set-AzCliSubscription {
     process {
         az account set -s $Subscription
         Write-Output "Loaded Subscription: $Subscription"
-        $global:AzContext = az account show | Out-String | ConvertFrom-Json
     }
 }
 

@@ -776,7 +776,7 @@ class DeleteBufferItem {
         $this.Path = $Path
         $this.DeleteMode = $DeleteMode
         $this.DeletedTime = (Get-Date)
-        $this.BinItem = if($DeleteMode -eq "SendToRecycleBin"){Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name)}
+        $this.BinItem = if ($DeleteMode -eq "SendToRecycleBin") { Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name) }
     }
 
     DeleteBufferItem ([string]$Name, [string]$Path, [string]$DeleteMode, [datetime]$DeletedTime) {
@@ -784,7 +784,7 @@ class DeleteBufferItem {
         $this.Path = $Path
         $this.DeleteMode = $DeleteMode
         $this.DeletedTime = $DeletedTime
-        $this.BinItem = if($DeleteMode -eq "SendToRecycleBin"){Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name)}
+        $this.BinItem = if ($DeleteMode -eq "SendToRecycleBin") { Get-RecycleBinItemDetails (Get-RecycleBinItem -Name $this.Name) }
     }
 
     Restore() {
@@ -1057,6 +1057,181 @@ function Update-ChocoApp {
     Write-Output "`n`n"
 }
 
+function Get-PropertyTree {
+    param(
+        [Parameter(Mandatory = $true)][object]$InputObject,
+        [Parameter(Mandatory = $false)][string]$ParentId
+    )
+    Write-Verbose "$($MyInvocation | Select-Object * | Out-String)" -Verbose
+    $InputObjectProperties = $InputObject.psobject.properties | Where-Object MemberType -EQ NoteProperty
+    if ($null -eq $script:PropertyTree) {
+        $script:PropertyTree = New-Object System.Collections.ArrayList
+        $script:RootPropertyCount = $InputObjectProperties.Count
+        $script:RootCounter = 0
+    }
+    # $CurrentParentId = if($InputObject -eq $PropertyTreeRoot.Object){$script:PropertyTreeRoot.ID}else{$ParentId}
+    for ($i = 0; $i -lt $InputObjectProperties.Count; $i++) {
+        $script:RootCounter++
+        # $Property = $InputObjectProperties[$i]
+        $PropertyName = $Property.Name
+        $CurrentObjectId = (New-Guid).Guid
+        $ObjectProperties = $InputObject.($PropertyName).psobject.properties | Where-Object MemberType -EQ NoteProperty
+        # $script:PropertyTree +=
+        $script:PropertyTree.Add( 
+            [pscustomobject]@{
+                Name   = $PropertyName
+                ID     = $CurrentObjectId
+                Object = $InputObject.($PropertyName)
+                Parent = $ParentId
+            }) >$null
+
+        foreach ($SubProperty in $ObjectProperties) {
+            # $SubProperty = $ObjectProperties[0]
+            Get-PropertyTree -InputObject $InputObject.($PropertyName).($SubProperty.Name) -ParentId $CurrentObjectId
+        }
+    }
+    if ($script:RootCounter -eq $script:RootPropertyCount) {
+        return $script:PropertyTree
+    }
+}
+
+function Merge-ObjectProperties {
+    param(
+        [Parameter(Mandatory = $true)][object]$FirstObject,
+        [Parameter(Mandatory = $false)][object]$SecondObject,
+        [Parameter(Mandatory = $false)][hashtable]$Replacements,
+        [Parameter(Mandatory = $false, DontShow)][object]$ParentObject
+    )
+    # Write-Host $FirstObject
+    # Write-Host $SecondObject
+    if ($null -eq $script:BaseObject) { $script:BaseObject = $FirstObject }
+    $CurrentObject = [pscustomobject]@{
+        Name         = ""
+        Properties   = $FirstObject.PsObject.Properties | Where-Object MemberType -EQ NoteProperty | Select-Object @{N = "Name"; E = { $_.Name } }, @{N = "Value"; E = { $_.Value } }, @{N = "Type"; E = { $FirstObject.($_.Name).GetType().Name } } | Format-List
+        Object       = $FirstObject
+        ParentObject = $ParentObject
+    }
+    $IsBaseProperty = (($script:BaseObject | Get-Member -MemberType NoteProperty).Name -contains $CurrentObject.Name)
+    if ($IsBaseProperty) { $script:PropertyChain = @() }
+    $ObjectProperties = $FirstObject | Get-Member -MemberType NoteProperty
+    if ($ObjectProperties.Count -gt 0) {
+        foreach ($Property in $ObjectProperties) {
+            $PropertyName = $Property.Name
+            $FirstObjectProp = $FirstObject.($PropertyName)
+            $SecondObjectProp = $SecondObject.($PropertyName)
+            
+            $OutputObject = [pscustomobject]@{Property = $null; BaseType = $FirstObjectProp.GetType().Name; BaseValue = $FirstObjectProp; SecondValue = $SecondObjectProp }
+            if ($FirstObjectProp -is [pscustomobject]) {
+                $script:PropertyChain += "{$PropertyName}"
+                if ($null -ne $SecondObjectProp) {
+                    Merge-ObjectProperties -FirstObject $FirstObject.($PropertyName) -SecondObject $SecondObject.($PropertyName)
+                }
+                else {
+                    Merge-ObjectProperties -FirstObject $FirstObject.($PropertyName)
+                }
+            }
+            elseif ($FirstObjectProp -is [array]) {
+                $script:PropertyChain += "[$PropertyName]"
+                for ($i = 0; $i -lt $FirstObjectProp.Count; $i++) {
+                    if ($null -ne $SecondObjectProp) {
+                        Merge-ObjectProperties -FirstObject $FirstObjectProp[$i] -SecondObject $SecondObjectProp[$i]
+                    }
+                    else {
+                        Merge-ObjectProperties -FirstObject $FirstObjectProp[$i]
+                    }
+                }
+            }
+            else {
+                $script:PropertyChain += "$PropertyName"
+                $OutputObject.Property = $script:PropertyChain -join "."
+                Write-Host "$(($OutputObject | Out-String).Trim())`n"
+                $RegexPattern = "\{\{([^\}]+)\}\}"
+                $FirstObjectProp = $FirstObjectProp -replace $RegexPattern, '$1'
+                $Replacement = if ($null -ne $Replacements) {
+                    $Replacements.GetEnumerator() | Where-Object { $_.Key -eq $FirstObjectProp } | Select-Object -exp Value
+                }
+                if (![string]::IsNullOrEmpty($Replacement)) {
+                    $FirstObject.($PropertyName) = $Replacement
+                    Write-Host "Updated Property [$($OutputObject.Property) = $Replacement] via Replacement"
+                }
+                else {
+                    if ($null -ne $SecondObjectProp) {
+                        if ($null -eq $FirstObjectProp -or $FirstObjectProp.Count -le 0 -or [string]::IsNullOrEmpty($FirstObjectProp)) {
+                            Write-Host "Updated Property [$($OutputObject.Property) = $($SecondObjectProp)] from SecondObject"
+                            $FirstObject.($PropertyName) = $SecondObjectProp
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Get-FileFromZip {
+    param(
+        [Parameter(Mandatory = $true)]$ZipFilePath,
+        [Parameter(Mandatory = $true)]$FileName
+    )
+    $zipFile = [System.IO.Compression.ZipFile]::Open("$ZipFilePath", "Update")
+    $entry = $zipFile.Entries.Where({ $_.name -eq $FileName })
+    $file = [System.IO.StreamReader]($entry).Open()
+    $content = $file.ReadToEnd()
+    $file.Close()
+    $zipFile.Dispose()
+
+    return $content
+}
+
+function Update-FileInZip {
+    param(
+        [Parameter(Mandatory = $true)]$ZipFilePath,
+        [Parameter(Mandatory = $true)]$FileName,
+        [Parameter(Mandatory = $true)]$Content
+    )
+    $zipFile = [System.IO.Compression.ZipFile]::Open("$ZipFilePath", "Update")
+    $entry = $zipFile.Entries.Where({ $_.name -eq $FileName })
+    $file = [System.IO.StreamWriter]($entry).Open()
+    $file.BaseStream.SetLength(0)
+    $file.Write($Content)
+    $file.Flush()
+    $file.Close()
+    Write-Output "Updated [$FileName] in zip file."
+    $zipFile.Dispose()
+}
+
+function Get-ReverseString {
+    [cmdletbinding()]
+    [alias('gr')]
+    param(
+        [Parameter(Mandatory = $true)][string]$InputString
+    )
+    $CharArray = [char[]]$InputString
+    $CharArray = $InputString.ToCharArray()
+    [array]::Reverse($CharArray)
+    $OutputString = -join ($CharArray)
+    return $OutputString
+}
+
+function ConvertTo-Base64 {
+    [cmdletbinding()]
+    [alias('tobase64')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline=$true)][string]$InputString
+    )
+    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($InputString)
+    $Base64String = [Convert]::ToBase64String($Bytes)
+    return $Base64String
+}
+
+function ConvertFrom-Base64 {
+    [cmdletbinding()]
+    [alias('frombase64')]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline=$true)][string]$InputString
+    )
+    $DecodedText = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($InputString))
+    return $DecodedText
+}
 
 $global:DeleteBuffer = [DeleteBuffer]::new()
 # $global:DeleteBuffer = [DeleteBuffer]::new($true)

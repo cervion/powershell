@@ -1,6 +1,6 @@
 ﻿# Azure DevOps Utilities
 
-Set-Alias tfs "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\TF.exe"
+Set-Alias tfs "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer\TF.exe"
 
 function Get-AdoApprovedPrs {
     [Alias('adoprs')]

@@ -9,7 +9,9 @@ function Get-GitBranchList {
 function Set-GitBranch {
     [alias('checkout')]
     [cmdletbinding()]
-    param()
+    param(
+        [switch]$Pull
+    )
     DynamicParam {
         if ((status) -match 'fatal') { break }
         $branches = Get-GitBranchList
@@ -23,6 +25,7 @@ function Set-GitBranch {
         Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Checkout - $branchName"
         $branchName = $branchName -replace 'remotes/origin/', ''
         & git checkout $branchName
+        if($Pull){Invoke-GitPull}
         Set-Directory
     }
 }
@@ -80,11 +83,14 @@ function New-GitBranch { [alias('branch')]param([parameter(Mandatory)]$branchNam
 function Remove-GitBranch {
     [alias('delete')]
     [cmdletbinding()]
-    param([ValidateSet('Local', 'Remote', 'Full')][string]$scope = "Local", [switch]$Force)
+    param(
+        [Parameter(Mandatory=$false, Position=0)][string]$DefaultBranch = "main",
+        [Parameter(Mandatory=$false, Position=2)][ValidateSet('Local', 'Remote', 'Full')][string]$scope = "Local", [switch]$Force
+    )
     DynamicParam {
         if ((status) -match 'fatal') { break }
         $branches = Get-GitBranchList
-        New-DynamicParam -Name branchName -ValidateSet $branches -Position 0 -Mandatory
+        New-DynamicParam -Name branchName -ValidateSet $branches -Position 1 -Mandatory
     }
     begin {
         $branchName = $PSBoundParameters.branchName
@@ -92,7 +98,7 @@ function Remove-GitBranch {
     process {
         if ((status) -match 'fatal') { break }
         Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Delete Branch - $branchName"
-        if ((GitBranch) -ine 'master') { master }
+        if ((GitBranch) -ine $DefaultBranch) { Set-GitBranch $DefaultBranch -Pull }
         if ($scope -ieq 'Full' -or $scope -ieq 'Remote' -and ($Force -or (Read-Host "Are you sure you want to delete REMOTE branch for $branchName`?") -ieq 'Y')) { & git push origin -d $branchName }
         if ($scope -ieq 'Full' -or $scope -ieq 'Local' -and ($Force -or (Read-Host "Are you sure you want to delete LOCAL branch for $branchName`?") -ieq 'Y')) { & git branch -D $branchName }
         Invoke-GitFetch
@@ -101,44 +107,50 @@ function Remove-GitBranch {
 }
 
 function Update-GitBranches {
-    [alias('clean', 'cleanf')]param([switch]$Force)Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Git - Checking Branches to Cleanup";
+    [alias('clean', 'cleanf')]
+    param(
+        [Parameter(Mandatory=$false)][string]$DefaultBranch,
+        [switch]$Force
+    )
+    $TargetBranch = if(![string]::IsNullOrEmpty($DefaultBranch)){$DefaultBranch}else{$env:GIT_MAIN_BRANCH}
+    Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") | Git - Checking Branches to Cleanup";
     if ($MyInvocation.Line -match 'cleanf') { $Force = $true }
-    if ($Force) { Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Force Clean" Yellow }
-    Set-GitMain
+    if ($Force) { Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") | Force Clean" -ForegroundColor Yellow }
+    Set-GitBranch $TargetBranch -Pull
     Invoke-GitFetch
     Get-GitBranches
-    $localBranches = (& git branch).Split("`n").Trim() | Where-Object { $_ -inotlike "*$env:GIT_MAIN_BRANCH" }
-    $remoteBranches = (& git branch -a).Split("`n").Trim() | Where-Object { $_ -ilike 'remotes/origin/*' -and $_ -inotlike "*$env:GIT_MAIN_BRANCH" }
+    $localBranches = (& git branch).Split("`n").Trim() | Where-Object { $_ -inotlike "*$TargetBranch" }
+    $remoteBranches = (& git branch -a).Split("`n").Trim() | Where-Object { $_ -ilike 'remotes/origin/*' -and $_ -inotlike "*$TargetBranch" }
     $hasDeletedBranches = $false
     foreach ($branch in $localBranches) {
         if ($remoteBranches -inotcontains "remotes/origin/$branch") {
-            Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Local Branch $branch does not have remote branch" Yellow
-            if ($Force -or (Read-Host "Delete? Y/N").ToUpper() -eq 'Y') { & git branch -D $branch; Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") |" "Local branch $branch deleted." Red; $hasDeletedBranches = $true }
+            Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") | Local Branch $branch does not have remote branch" -ForegroundColor Yellow
+            if ($Force -or (Read-Host "Delete? Y/N").ToUpper() -eq 'Y') { & git branch -D $branch; Write-Host "$(Get-Date -Format "dd/MM/yyyy HH:mm:ss") | Local branch $branch deleted." -ForegroundColor Red; $hasDeletedBranches = $true }
         }
     }
     if ($hasDeletedBranches) {
         Invoke-GitFetch
         Get-GitBranches
-    }    
+    }
 }
 
 function New-AdoPullRequest { 
     [alias('pr')]
     param(
-        [Parameter(Mandatory = $false)]$Org = $env:AZURE_DEVOPS_ORG
+        [Parameter(Mandatory = $false)]$TargetBranch
     )
     if (Confirm-IsGitRepo) {
-        if ([string]::IsNullOrEmpty($Org)) {
-            throw "`$Org parameter is Null or Empty. Please set `$env:AZURE_DEVOPS_ORG or pass `$Org parameter"
-        }
-        Start-Process "https://dev.azure.com/$($Org)/$(Get-GitProject)/_git/$(Get-GitRepo)/pullrequestcreate?sourceRef=$(ConvertTo-UrlEncoded (Get-GitBranch))&targetRef=$env:GIT_MAIN_BRANCH"
+        $TargetRef = if(![string]::IsNullOrEmpty($TargetBranch)){$TargetBranch}else{$env:GIT_MAIN_BRANCH}
+        Start-Process "https://dev.azure.com/$(Get-GitOrg)/$(Get-GitProject)/_git/$(Get-GitRepo)/pullrequestcreate?sourceRef=$(ConvertTo-UrlEncoded (Get-GitBranch))&targetRef=$TargetRef"
     }
     else {
         Write-Host "Not a Git Repo"
     }
 }
 
-function Get-GitProject { return (git remote get-url origin).Split("/")[-3] }
+function Get-GitProject { return (git remote get-url origin) -replace '.*\.com/[^/]+/([^/]+).*','$1' }
+
+function Get-GitOrg { return (git remote get-url origin) -replace '.*\.com/([^/]+)/.*','$1' }
 
 function Get-GitRepo { return (git remote get-url origin).Split('/')[-1] }
 
